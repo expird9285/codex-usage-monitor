@@ -205,6 +205,7 @@ const IDM_PERCENT_INSIDE_BATTERY: u16 = 127;
 const IDM_RESET_COUNTDOWN: u16 = 128;
 const IDM_RESET_CLOCK: u16 = 129;
 const IDM_WINDOWS_STARTUP_SETTINGS: u16 = 130;
+const IDM_BAR_RING: u16 = 131;
 
 const WM_DPICHANGED_MSG: u32 = 0x02E0;
 const WM_APP_UPDATE_CHECK_COMPLETE: u32 = WM_APP + 2;
@@ -422,12 +423,15 @@ enum Palette {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum BarStyle {
-    #[default]
     Continuous,
     #[serde(alias = "classic_segmented")]
     Segmented,
     Dots,
     Battery,
+    /// Split ring per provider (top: 5-hour, bottom: weekly) with the
+    /// provider logo inside; details are shown in hover tooltips.
+    #[default]
+    Ring,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -2046,6 +2050,92 @@ const MODEL_RIGHT_MARGIN: i32 = 9;
 const RIGHT_MARGIN: i32 = 4;
 const WIDGET_HEIGHT: i32 = 46;
 
+const RING_DIAMETER: i32 = 32;
+const RING_LEFT_MARGIN: i32 = 8;
+const RING_GAP: i32 = 8;
+
+fn ring_widget_width(active_models: i32) -> i32 {
+    let n = active_models.max(1);
+    sc(LEFT_DIVIDER_W)
+        + sc(RING_LEFT_MARGIN)
+        + sc(RING_DIAMETER) * n
+        + sc(RING_GAP) * (n - 1)
+        + sc(RIGHT_MARGIN)
+}
+
+/// Client-area rectangles of the visible provider rings, in provider order
+/// (Claude Code, Codex, Antigravity).
+fn ring_slots(providers: [bool; 3], height: i32) -> Vec<(usize, RECT)> {
+    let d = sc(RING_DIAMETER).min(height - sc(4)).max(sc(16));
+    let top = (height - d) / 2;
+    let mut left = sc(LEFT_DIVIDER_W) + sc(RING_LEFT_MARGIN);
+    let mut slots = Vec::new();
+    for (index, visible) in providers.into_iter().enumerate() {
+        if visible {
+            slots.push((
+                index,
+                RECT {
+                    left,
+                    top,
+                    right: left + d,
+                    bottom: top + d,
+                },
+            ));
+            left += d + sc(RING_GAP);
+        }
+    }
+    slots
+}
+
+/// Remaining fraction for the widget ring from the displayed text and used %.
+fn ring_fraction(used: f64, text: &str) -> Option<f64> {
+    text.contains('%')
+        .then(|| (poller::remaining_percentage(used) / 100.0).clamp(0.0, 1.0))
+}
+
+/// Composite the anti-aliased rings onto premultiplied ARGB widget pixels.
+fn composite_rings(pixels: &mut [u32], width: i32, height: i32, content: &WidgetContent<'_>) {
+    let dark = content.appearance.is_dark(content.system_dark);
+    for (index, rect) in ring_slots(content.providers, height) {
+        let d = rect.right - rect.left;
+        let values = tray_icon::RingValues {
+            session: content.visible_rows[0]
+                .then(|| ring_fraction(content.used[0][index], &content.text[0][index]))
+                .flatten(),
+            weekly: content.visible_rows[1]
+                .then(|| ring_fraction(content.used[1][index], &content.text[1][index]))
+                .flatten(),
+        };
+        let ring = crate::ring_icon::render_ring_bgra(d as u32, values, dark);
+        for y in 0..d {
+            for x in 0..d {
+                let (px, py) = (rect.left + x, rect.top + y);
+                if px < 0 || py < 0 || px >= width || py >= height {
+                    continue;
+                }
+                let si = ((y * d + x) * 4) as usize;
+                let a = u32::from(ring[si + 3]);
+                if a == 0 {
+                    continue;
+                }
+                let dst = &mut pixels[(py * width + px) as usize];
+                let inv = 255 - a;
+                let old = *dst;
+                let blend = |src: u8, shift: u32| -> u32 {
+                    let d = (old >> shift) & 0xFF;
+                    ((u32::from(src) * a + d * inv + 127) / 255).min(255)
+                };
+                let b = blend(ring[si], 0);
+                let g = blend(ring[si + 1], 8);
+                let r = blend(ring[si + 2], 16);
+                let da = (old >> 24) & 0xFF;
+                let oa = (a + (da * inv + 127) / 255).min(255);
+                *dst = oa << 24 | r << 16 | g << 8 | b;
+            }
+        }
+    }
+}
+
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
     let divider_h = sc(25);
     let height = {
@@ -2235,6 +2325,9 @@ fn widget_width_from_columns(
     appearance: Appearance,
     (label_width, text_width): (i32, i32),
 ) -> i32 {
+    if appearance.bar_style == BarStyle::Ring {
+        return ring_widget_width(active_models);
+    }
     let bar_segments = row_bar_segment_count(active_models);
     let model_width = model_usage_width(bar_segments, text_width, appearance);
 
@@ -2694,12 +2787,75 @@ fn mcp_snapshot() -> mcp_server::Snapshot {
     Some([0, 1].map(|id| mcp_server::ProviderRecord::from_service(&s.monitor.services[id])))
 }
 
+fn ring_tooltip_regions(s: &AppState) -> Vec<(RECT, String)> {
+    let lang = s.language.tip_lang();
+    let height = unsafe {
+        let mut rect = RECT::default();
+        if GetClientRect(s.hwnd.to_hwnd(), &mut rect).is_ok() && rect.bottom > 0 {
+            rect.bottom
+        } else {
+            sc(WIDGET_HEIGHT)
+        }
+    };
+    let providers = [s.show_claude_code, s.show_codex, s.show_antigravity];
+    let multiple = providers.iter().filter(|v| **v).count() > 1;
+    let antigravity_name = antigravity_label(s);
+    let names = ["Claude Code", "Codex", antigravity_name.as_str()];
+    let now = SystemTime::now();
+    let mut regions = Vec::new();
+    for (id, rect) in ring_slots(providers, height) {
+        let service = &s.monitor.services[id];
+        let usage = service.data.as_ref();
+        let mid = (rect.top + rect.bottom) / 2;
+        for (weekly, visible, top, bottom) in [
+            (false, s.show_session_window, 0, mid),
+            (true, s.show_weekly_window, mid, height),
+        ] {
+            if !visible {
+                continue;
+            }
+            let section = usage.map(|u| if weekly { &u.weekly } else { &u.session });
+            let mut text = tray_quota_line(lang, weekly, section.and_then(remaining_fraction));
+            if multiple {
+                text = format!("{} · {text}", names[id]);
+            }
+            if let Some(at) = format_precise_reset_time(
+                section
+                    .filter(|section| section.has_reading())
+                    .and_then(|section| section.resets_at)
+                    .filter(|&t| t > now),
+            ) {
+                text.push_str(&format!("\n{} {at}", lang.pick("重置", "초기화", "Resets")));
+            }
+            if let Some(error) = service.error {
+                text.push_str(&format!(
+                    "\n{}: {}",
+                    lang.pick("最近请求失败", "최근 요청 실패", "Latest request failed"),
+                    poll_error_display_label(error, s.language)
+                ));
+            }
+            regions.push((
+                RECT {
+                    left: rect.left - sc(RING_GAP) / 2,
+                    top,
+                    right: rect.right + sc(RING_GAP) / 2,
+                    bottom,
+                },
+                text,
+            ));
+        }
+    }
+    regions
+}
+
 fn update_quota_tooltips() {
     let (hwnd, regions) = {
         let state = lock_state();
         let Some(s) = state.as_ref() else { return };
         let mut regions = Vec::new();
-        if !s.dragging {
+        if !s.dragging && s.appearance.bar_style == BarStyle::Ring {
+            regions = ring_tooltip_regions(s);
+        } else if !s.dragging {
             let lang = s.language.tip_lang();
             let count = active_model_count(s.show_claude_code, s.show_codex, s.show_antigravity);
             let (label_width, text_width) = current_usage_layout_widths(s);
@@ -2892,6 +3048,9 @@ fn render_layered() {
         let _ = GdiFlush();
         let pixels = std::slice::from_raw_parts_mut(bits.cast::<u32>(), pixel_count);
         apply_widget_alpha(pixels, content.appearance, content.system_dark);
+        if content.appearance.bar_style == BarStyle::Ring {
+            composite_rings(pixels, width, height, &content);
+        }
 
         // Push to window via UpdateLayeredWindow
         let pt_src = POINT { x: 0, y: 0 };
@@ -3029,6 +3188,24 @@ fn paint_content(hdc: HDC, width: i32, height: i32, content: &WidgetContent<'_>)
         };
         FillRect(hdc, &right_rect, right_brush);
         let _ = DeleteObject(right_brush);
+
+        if appearance.bar_style == BarStyle::Ring {
+            // Rings are composited afterwards; only the logos are GDI-drawn.
+            if !appearance.hide_provider_logos {
+                for (index, rect) in ring_slots(providers, height) {
+                    let d = rect.right - rect.left;
+                    let size = (d * 7 / 16).max(sc(10));
+                    provider_icons::draw(
+                        hdc,
+                        rect.left + (d - size) / 2,
+                        rect.top + (d - size) / 2,
+                        size,
+                        WIDGET_PROVIDERS[index],
+                    );
+                }
+            }
+            return;
+        }
 
         let content_x = sc(LEFT_DIVIDER_W) + sc(DIVIDER_RIGHT_MARGIN);
         let row_height = appearance.row_height().min((height / rows).max(1));
@@ -4207,6 +4384,7 @@ unsafe extern "system" fn wnd_proc(
                 | IDM_BAR_SEGMENTED
                 | IDM_BAR_DOTS
                 | IDM_BAR_BATTERY
+                | IDM_BAR_RING
                 | IDM_BAR_MEDIUM
                 | IDM_BAR_THIN
                 | IDM_BAR_THICK
@@ -4260,6 +4438,7 @@ unsafe extern "system" fn wnd_proc(
                                 IDM_BAR_SEGMENTED => s.appearance.bar_style = BarStyle::Segmented,
                                 IDM_BAR_DOTS => s.appearance.bar_style = BarStyle::Dots,
                                 IDM_BAR_BATTERY => s.appearance.bar_style = BarStyle::Battery,
+                                IDM_BAR_RING => s.appearance.bar_style = BarStyle::Ring,
                                 IDM_BAR_MEDIUM => s.appearance.bar_thickness = BarThickness::Medium,
                                 IDM_BAR_THIN => s.appearance.bar_thickness = BarThickness::Thin,
                                 IDM_BAR_THICK => s.appearance.bar_thickness = BarThickness::Thick,
@@ -4631,7 +4810,7 @@ fn draw_usage_bar(
     let radius = bar_height / 2;
     let percent_inside = appearance.shows_percent_in_battery();
     match appearance.bar_style {
-        BarStyle::Continuous => {
+        BarStyle::Continuous | BarStyle::Ring => {
             draw_rounded_rect(hdc, &rect, track, radius);
             fill_rounded_bar(hdc, &rect, ratio, accent, radius);
         }
@@ -4725,7 +4904,7 @@ fn drawn_bar_height(appearance: Appearance, row_height: i32) -> i32 {
             (bar_height + sc(4)).max(sc(appearance.font_px() + 4))
         }
         BarStyle::Battery => bar_height + sc(4),
-        BarStyle::Continuous | BarStyle::Segmented => bar_height,
+        BarStyle::Continuous | BarStyle::Segmented | BarStyle::Ring => bar_height,
     };
     height.min((row_height - sc(2)).max(1))
 }
@@ -5504,7 +5683,10 @@ mod tests {
     }
     #[test]
     fn hiding_provider_logos_reclaims_their_columns() {
-        let original = Appearance::default();
+        let original = Appearance {
+            bar_style: BarStyle::Continuous,
+            ..Appearance::default()
+        };
         let hidden = Appearance {
             hide_provider_logos: true,
             ..original

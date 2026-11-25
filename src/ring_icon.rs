@@ -121,10 +121,17 @@ fn in_diamond(g: &Geometry, dx: f64, dy: f64) -> bool {
     outside + qx.max(qy).min(0.0) - g.diamond_radius <= 0.0
 }
 
-fn sample(g: &Geometry, pal: &Palette, values: RingValues, x: f64, y: f64) -> Option<Rgba> {
+fn sample(
+    g: &Geometry,
+    pal: &Palette,
+    values: RingValues,
+    diamond: bool,
+    x: f64,
+    y: f64,
+) -> Option<Rgba> {
     let dx = x - g.c;
     let dy = y - g.c;
-    if in_diamond(g, dx, dy) {
+    if diamond && in_diamond(g, dx, dy) {
         return Some(pal.diamond);
     }
     let half_len = PI - 2.0 * g.half_gap;
@@ -147,6 +154,16 @@ fn sample(g: &Geometry, pal: &Palette, values: RingValues, x: f64, y: f64) -> Op
 /// Render a `size`x`size` icon as top-down BGRA with straight (non-premultiplied)
 /// alpha, the format `CreateIconIndirect` expects for 32-bit icons.
 pub fn render_bgra(size: u32, values: RingValues, dark_taskbar: bool) -> Vec<u8> {
+    render(size, values, dark_taskbar, true)
+}
+
+/// Same split ring without the centre diamond (the taskbar widget puts the
+/// provider logo there instead).
+pub fn render_ring_bgra(size: u32, values: RingValues, dark_taskbar: bool) -> Vec<u8> {
+    render(size, values, dark_taskbar, false)
+}
+
+fn render(size: u32, values: RingValues, dark_taskbar: bool, diamond: bool) -> Vec<u8> {
     const SS: u32 = 4;
     let g = geometry(size);
     let pal = palette(dark_taskbar);
@@ -158,7 +175,7 @@ pub fn render_bgra(size: u32, values: RingValues, dark_taskbar: bool) -> Vec<u8>
                 for sx in 0..SS {
                     let x = px as f64 + (sx as f64 + 0.5) / SS as f64;
                     let y = py as f64 + (sy as f64 + 0.5) / SS as f64;
-                    if let Some(c) = sample(&g, &pal, values, x, y) {
+                    if let Some(c) = sample(&g, &pal, values, diamond, x, y) {
                         r += c.r * c.a;
                         gg += c.g * c.a;
                         b += c.b * c.a;

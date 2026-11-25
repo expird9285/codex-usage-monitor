@@ -82,6 +82,7 @@ pub(super) const STRINGS: Strings = Strings {
     palette_light: "ライト",
     bar_dots: "ドット",
     bar_battery: "バッテリー",
+    bar_ring: "リング",
     bar_thin: "細い",
     bar_medium: "標準",
     bar_thick: "太い",

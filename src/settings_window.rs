@@ -656,12 +656,14 @@ fn rows(page: Page, s: &AppState) -> Vec<Row> {
                         (IDM_BAR_SEGMENTED, strings.bar_segmented),
                         (IDM_BAR_DOTS, strings.bar_dots),
                         (IDM_BAR_BATTERY, strings.bar_battery),
+                        (IDM_BAR_RING, strings.bar_ring),
                     ],
                     match a.bar_style {
                         BarStyle::Continuous => IDM_BAR_CONTINUOUS,
                         BarStyle::Segmented => IDM_BAR_SEGMENTED,
                         BarStyle::Dots => IDM_BAR_DOTS,
                         BarStyle::Battery => IDM_BAR_BATTERY,
+                        BarStyle::Ring => IDM_BAR_RING,
                     },
                 ),
                 choice(

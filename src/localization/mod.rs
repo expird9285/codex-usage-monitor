@@ -295,6 +295,7 @@ pub struct Strings {
     pub palette_light: &'static str,
     pub bar_dots: &'static str,
     pub bar_battery: &'static str,
+    pub bar_ring: &'static str,
     pub bar_thin: &'static str,
     pub bar_medium: &'static str,
     pub bar_thick: &'static str,

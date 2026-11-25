@@ -82,6 +82,7 @@ pub(super) const STRINGS: Strings = Strings {
     palette_light: "Clair",
     bar_dots: "Points",
     bar_battery: "Batterie",
+    bar_ring: "Anneau",
     bar_thin: "Fin",
     bar_medium: "Moyen",
     bar_thick: "Épais",

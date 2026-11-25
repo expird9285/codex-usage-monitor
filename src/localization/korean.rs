@@ -82,6 +82,7 @@ pub(super) const STRINGS: Strings = Strings {
     palette_light: "밝게",
     bar_dots: "점",
     bar_battery: "배터리",
+    bar_ring: "링",
     bar_thin: "얇게",
     bar_medium: "보통",
     bar_thick: "굵게",
