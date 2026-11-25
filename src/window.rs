@@ -2106,7 +2106,9 @@ fn composite_rings(pixels: &mut [u32], width: i32, height: i32, content: &Widget
                 .then(|| ring_fraction(content.used[1][index], &content.text[1][index]))
                 .flatten(),
         };
-        let ring = crate::ring_icon::render_ring_bgra(d as u32, values, dark);
+        let ease = |t: f64| t * t * (3.0 - 2.0 * t);
+        let grow = content.ring_grow[index].map(ease);
+        let ring = crate::ring_icon::render_ring_bgra(d as u32, values, dark, grow);
         for y in 0..d {
             for x in 0..d {
                 let (px, py) = (rect.left + x, rect.top + y);
@@ -2134,6 +2136,132 @@ fn composite_rings(pixels: &mut [u32], width: i32, height: i32, content: &Widget
             }
         }
     }
+}
+
+const TIMER_RING_ANIM: usize = 8;
+const WM_MOUSELEAVE_MSG: u32 = 0x02A3;
+const RING_ANIM_MS: f64 = 140.0;
+
+struct RingHover {
+    target: Option<(usize, usize)>,
+    grow: [[f64; 2]; 3],
+    last: Option<Instant>,
+    tracking: bool,
+}
+
+static RING_HOVER: Mutex<RingHover> = Mutex::new(RingHover {
+    target: None,
+    grow: [[0.0; 2]; 3],
+    last: None,
+    tracking: false,
+});
+
+fn ring_hover_grow() -> [[f64; 2]; 3] {
+    RING_HOVER.lock().unwrap_or_else(|e| e.into_inner()).grow
+}
+
+/// Which ring half (provider index, 0 = upper/5-hour, 1 = lower/weekly) is
+/// under the client point.
+fn ring_hit(providers: [bool; 3], height: i32, x: i32, y: i32) -> Option<(usize, usize)> {
+    let pad = sc(RING_GAP) / 2;
+    ring_slots(providers, height).into_iter().find_map(|(index, rect)| {
+        (x >= rect.left - pad && x < rect.right + pad && y >= 0 && y < height)
+            .then(|| (index, usize::from(y >= (rect.top + rect.bottom) / 2)))
+    })
+}
+
+fn set_ring_hover(hwnd: HWND, target: Option<(usize, usize)>) {
+    {
+        let mut hover = RING_HOVER.lock().unwrap_or_else(|e| e.into_inner());
+        if hover.target == target {
+            return;
+        }
+        hover.target = target;
+        hover.last = Some(Instant::now());
+    }
+    unsafe {
+        SetTimer(hwnd, TIMER_RING_ANIM, 15, None);
+    }
+}
+
+fn update_ring_hover_from_mouse(hwnd: HWND, lparam: LPARAM) {
+    let x = (lparam.0 & 0xFFFF) as i16 as i32;
+    let y = ((lparam.0 >> 16) & 0xFFFF) as i16 as i32;
+    let target = {
+        let state = lock_state();
+        let Some(s) = state.as_ref() else { return };
+        if s.dragging || s.appearance.bar_style != BarStyle::Ring {
+            None
+        } else {
+            let height = unsafe {
+                let mut rect = RECT::default();
+                let _ = GetClientRect(hwnd, &mut rect);
+                rect.bottom
+            };
+            ring_hit(
+                [s.show_claude_code, s.show_codex, s.show_antigravity],
+                height,
+                x,
+                y,
+            )
+        }
+    };
+    let start_tracking = {
+        let mut hover = RING_HOVER.lock().unwrap_or_else(|e| e.into_inner());
+        !std::mem::replace(&mut hover.tracking, true)
+    };
+    if start_tracking {
+        use windows::Win32::UI::Input::KeyboardAndMouse::{
+            TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT,
+        };
+        let mut track = TRACKMOUSEEVENT {
+            cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32,
+            dwFlags: TME_LEAVE,
+            hwndTrack: hwnd,
+            dwHoverTime: 0,
+        };
+        unsafe {
+            let _ = TrackMouseEvent(&mut track);
+        }
+    }
+    set_ring_hover(hwnd, target);
+}
+
+fn ring_mouse_left(hwnd: HWND) {
+    RING_HOVER.lock().unwrap_or_else(|e| e.into_inner()).tracking = false;
+    set_ring_hover(hwnd, None);
+}
+
+fn step_ring_animation(hwnd: HWND) {
+    let settled = {
+        let mut hover = RING_HOVER.lock().unwrap_or_else(|e| e.into_inner());
+        let now = Instant::now();
+        let dt = hover
+            .last
+            .map_or(0.0, |last| now.duration_since(last).as_secs_f64() * 1000.0);
+        hover.last = Some(now);
+        let step = dt / RING_ANIM_MS;
+        let target = hover.target;
+        let mut settled = true;
+        for (index, halves) in hover.grow.iter_mut().enumerate() {
+            for (half, grow) in halves.iter_mut().enumerate() {
+                let goal = if target == Some((index, half)) { 1.0 } else { 0.0 };
+                *grow = if *grow < goal {
+                    (*grow + step).min(goal)
+                } else {
+                    (*grow - step).max(goal)
+                };
+                settled &= *grow == goal;
+            }
+        }
+        settled
+    };
+    if settled {
+        unsafe {
+            let _ = KillTimer(hwnd, TIMER_RING_ANIM);
+        }
+    }
+    render_layered();
 }
 
 fn is_drag_handle_point(client_x: i32, client_y: i32) -> bool {
@@ -2929,6 +3057,8 @@ struct WidgetContent<'a> {
     visible_rows: [bool; 2],
     used: [[f64; 3]; 2],
     text: [[std::borrow::Cow<'a, str>; 3]; 2],
+    /// Hover animation progress per provider ring and half (0..=1).
+    ring_grow: [[f64; 2]; 3],
 }
 
 const WIDGET_PROVIDERS: [Provider; 3] = [Provider::Claude, Provider::Codex, Provider::Antigravity];
@@ -2955,6 +3085,7 @@ impl WidgetContent<'static> {
                     s.antigravity_weekly_percent,
                 ],
             ],
+            ring_grow: ring_hover_grow(),
             text: [
                 values([
                     &s.session_text,
@@ -3114,6 +3245,7 @@ fn paint_content(hdc: HDC, width: i32, height: i32, content: &WidgetContent<'_>)
         visible_rows,
         used,
         ref text,
+        ..
     } = *content;
     let rows = visible_rows
         .into_iter()
@@ -3961,6 +4093,7 @@ unsafe extern "system" fn wnd_proc(
                 TIMER_UPDATE_CHECK => {
                     begin_update_check(hwnd, false);
                 }
+                TIMER_RING_ANIM => step_ring_animation(hwnd),
                 _ => {}
             }
             LRESULT(0)
@@ -4035,7 +4168,12 @@ unsafe extern "system" fn wnd_proc(
             SetCapture(hwnd);
             LRESULT(0)
         }
+        WM_MOUSELEAVE_MSG => {
+            ring_mouse_left(hwnd);
+            LRESULT(0)
+        }
         WM_MOUSEMOVE => {
+            update_ring_hover_from_mouse(hwnd, lparam);
             let is_dragging = {
                 let state = lock_state();
                 state.as_ref().map(|s| s.dragging).unwrap_or(false)

@@ -47,6 +47,7 @@ fn sample(
         visible_rows: [true; 2],
         used: USED,
         text,
+        ring_grow: [[0.0; 2]; 3],
     }
 }
 

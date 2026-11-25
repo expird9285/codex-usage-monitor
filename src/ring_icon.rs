@@ -51,7 +51,9 @@ fn palette(dark_taskbar: bool) -> Palette {
     }
 }
 
+#[derive(Clone, Copy)]
 struct Geometry {
+    size: f64,
     c: f64,
     ring_mid: f64,
     half_w: f64,
@@ -60,10 +62,12 @@ struct Geometry {
     diamond_radius: f64,
 }
 
-fn geometry(size: u32) -> Geometry {
+/// `reserve` is the fraction of the size kept free around the ring so a
+/// hovered half can grow into it.
+fn geometry(size: u32, reserve: f64) -> Geometry {
     let s = size as f64;
     let half_w = (s * 0.042).max(0.9);
-    let outer = s * 0.5 - 0.35;
+    let outer = s * 0.5 - 0.35 - s * reserve;
     let ring_mid = outer - half_w;
     // Gap between the two halves at 3 and 9 o'clock: room for both round caps
     // plus a visible sliver of empty space.
@@ -72,6 +76,7 @@ fn geometry(size: u32) -> Geometry {
     let diamond_half_diag = s * 0.23;
     let diamond_half_side = diamond_half_diag / 2f64.sqrt();
     Geometry {
+        size: s,
         c: s / 2.0,
         ring_mid,
         half_w,
@@ -121,10 +126,20 @@ fn in_diamond(g: &Geometry, dx: f64, dy: f64) -> bool {
     outside + qx.max(qy).min(0.0) - g.diamond_radius <= 0.0
 }
 
+fn grown(g: &Geometry, grow: f64) -> Geometry {
+    let grow = grow.clamp(0.0, 1.0);
+    Geometry {
+        ring_mid: g.ring_mid + grow * g.size * 0.035,
+        half_w: g.half_w * (1.0 + 0.7 * grow),
+        ..*g
+    }
+}
+
 fn sample(
     g: &Geometry,
     pal: &Palette,
     values: RingValues,
+    grow: [f64; 2],
     diamond: bool,
     x: f64,
     y: f64,
@@ -136,10 +151,11 @@ fn sample(
     }
     let half_len = PI - 2.0 * g.half_gap;
     // Upper half: 9 o'clock -> 12 -> 3 o'clock. Lower half: 3 -> 6 -> 9.
-    for (start, value) in [
-        (1.5 * PI + g.half_gap, values.session),
-        (0.5 * PI + g.half_gap, values.weekly),
+    for (start, value, grow) in [
+        (1.5 * PI + g.half_gap, values.session, grow[0]),
+        (0.5 * PI + g.half_gap, values.weekly, grow[1]),
     ] {
+        let g = &grown(g, grow);
         let fill_len = value.map_or(0.0, |v| v.clamp(0.0, 1.0) * half_len);
         if fill_len > 0.0 && on_arc(g, dx, dy, start, fill_len) {
             return Some(pal.fill);
@@ -154,18 +170,32 @@ fn sample(
 /// Render a `size`x`size` icon as top-down BGRA with straight (non-premultiplied)
 /// alpha, the format `CreateIconIndirect` expects for 32-bit icons.
 pub fn render_bgra(size: u32, values: RingValues, dark_taskbar: bool) -> Vec<u8> {
-    render(size, values, dark_taskbar, true)
+    render(size, values, dark_taskbar, true, 0.0, [0.0; 2])
 }
 
 /// Same split ring without the centre diamond (the taskbar widget puts the
 /// provider logo there instead).
-pub fn render_ring_bgra(size: u32, values: RingValues, dark_taskbar: bool) -> Vec<u8> {
-    render(size, values, dark_taskbar, false)
+/// `grow` (0..=1 per half: upper 5-hour, lower weekly) animates a hovered
+/// half slightly larger and thicker.
+pub fn render_ring_bgra(
+    size: u32,
+    values: RingValues,
+    dark_taskbar: bool,
+    grow: [f64; 2],
+) -> Vec<u8> {
+    render(size, values, dark_taskbar, false, 0.07, grow)
 }
 
-fn render(size: u32, values: RingValues, dark_taskbar: bool, diamond: bool) -> Vec<u8> {
+fn render(
+    size: u32,
+    values: RingValues,
+    dark_taskbar: bool,
+    diamond: bool,
+    reserve: f64,
+    grow: [f64; 2],
+) -> Vec<u8> {
     const SS: u32 = 4;
-    let g = geometry(size);
+    let g = geometry(size, reserve);
     let pal = palette(dark_taskbar);
     let mut out = vec![0u8; (size * size * 4) as usize];
     for py in 0..size {
@@ -175,7 +205,7 @@ fn render(size: u32, values: RingValues, dark_taskbar: bool, diamond: bool) -> V
                 for sx in 0..SS {
                     let x = px as f64 + (sx as f64 + 0.5) / SS as f64;
                     let y = py as f64 + (sy as f64 + 0.5) / SS as f64;
-                    if let Some(c) = sample(&g, &pal, values, diamond, x, y) {
+                    if let Some(c) = sample(&g, &pal, values, grow, diamond, x, y) {
                         r += c.r * c.a;
                         gg += c.g * c.a;
                         b += c.b * c.a;
