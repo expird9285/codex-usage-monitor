@@ -62,7 +62,7 @@ struct Geometry {
 
 fn geometry(size: u32) -> Geometry {
     let s = size as f64;
-    let half_w = (s * 0.065).max(0.95);
+    let half_w = (s * 0.042).max(0.9);
     let outer = s * 0.5 - 0.35;
     let ring_mid = outer - half_w;
     // Gap between the two halves at 3 and 9 o'clock: room for both round caps
