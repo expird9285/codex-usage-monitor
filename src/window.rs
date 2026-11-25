@@ -19,7 +19,7 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 
 use crate::codex_colors::{codex_brand_color, SingleColor};
 use crate::diagnose;
-use crate::localization::{self, LanguageId, Strings};
+use crate::localization::{self, LanguageId, Strings, TipLang};
 use crate::mcp_server;
 use crate::models::{AppUsageData, QuotaDisplayMode};
 use crate::native_interop::{
@@ -714,7 +714,7 @@ fn load_settings() -> SettingsFile {
         let language = localization::resolve_language(
             settings.language.as_deref().and_then(LanguageId::from_code),
         );
-        settings.quota_display_mode = Some(if language == LanguageId::SimplifiedChinese {
+        settings.quota_display_mode = Some(if matches!(language, LanguageId::SimplifiedChinese | LanguageId::Korean) {
             QuotaDisplayMode::Remaining
         } else {
             QuotaDisplayMode::Used
@@ -868,6 +868,7 @@ fn clock_quota_line(
     }
 }
 
+#[allow(dead_code)]
 fn service_tooltip(
     service: &str,
     session_text: &str,
@@ -1019,7 +1020,15 @@ fn append_quota_alert(
 
     let remaining = poller::format_percent(remaining);
     let reset = format_precise_reset_time(section.resets_at);
-    let (title, message) = if language == LanguageId::SimplifiedChinese {
+    let (title, message) = if language == LanguageId::Korean {
+        (
+            format!("{provider_label} 한도 알림"),
+            format!(
+                "{window_label} 한도가 {remaining} 남았습니다. 초기화: {}",
+                reset.unwrap_or_else(|| "알 수 없음".to_string())
+            ),
+        )
+    } else if language == LanguageId::SimplifiedChinese {
         (
             format!("{provider_label} 额度提醒"),
             format!(
@@ -1051,45 +1060,87 @@ fn antigravity_label(state: &AppState) -> String {
     format!("Antigravity ({group})")
 }
 
+/// Remaining fraction (0..=1) for one quota window, if the provider reported it.
+fn remaining_fraction(section: &crate::models::UsageSection) -> Option<f64> {
+    section
+        .has_reading()
+        .then(|| ((100.0 - section.percentage) / 100.0).clamp(0.0, 1.0))
+}
+
+fn tray_quota_line(lang: TipLang, weekly: bool, remaining: Option<f64>) -> String {
+    let label = if weekly {
+        lang.pick("周额度", "주간 한도", "Weekly limit")
+    } else {
+        lang.pick("5 小时额度", "5시간 한도", "5-hour limit")
+    };
+    match remaining {
+        Some(r) => {
+            let percent = (r * 100.0).round() as i64;
+            match lang {
+                TipLang::Chinese => format!("{label} · 剩余 {percent}%"),
+                TipLang::Korean => format!("{label} · {percent}% 남음"),
+                TipLang::English => format!("{label} · {percent}% left"),
+            }
+        }
+        None => format!("{label} · {}", lang.pick("无数据", "데이터 없음", "no data")),
+    }
+}
+
 fn tray_icon_data_from_state() -> Option<tray_icon::TrayIconData> {
     let state = lock_state();
     match state.as_ref() {
         Some(s) if s.has_poll_result => {
-            let mut services = Vec::new();
             let strings = s.language.strings();
-            if s.show_claude_code {
-                services.push(service_tooltip(
+            let lang = s.language.tip_lang();
+            let antigravity_name = antigravity_label(s);
+            let data = s.data.as_ref();
+            // Codex first: it is the service this build is primarily for.
+            let services = [
+                (s.show_codex, strings.codex_model, data.and_then(|d| d.codex.as_ref())),
+                (
+                    s.show_claude_code,
                     strings.claude_code_model,
-                    &s.session_text,
-                    &s.weekly_text,
-                    s.show_session_window,
-                    s.show_weekly_window,
-                ));
-            }
-            if s.show_codex {
-                services.push(service_tooltip(
-                    strings.codex_model,
-                    &s.codex_session_text,
-                    &s.codex_weekly_text,
-                    s.show_session_window,
-                    s.show_weekly_window,
-                ));
-            }
-            if s.show_antigravity {
-                services.push(service_tooltip(
-                    &antigravity_label(s),
-                    &s.antigravity_session_text,
-                    &s.antigravity_weekly_text,
-                    s.show_session_window,
-                    s.show_weekly_window,
-                ));
+                    data.and_then(|d| d.claude_code.as_ref()),
+                ),
+                (
+                    s.show_antigravity,
+                    antigravity_name.as_str(),
+                    data.and_then(|d| d.antigravity.as_ref()),
+                ),
+            ];
+            let visible: Vec<_> = services.iter().filter(|(show, _, _)| *show).collect();
+            let mut ring = None;
+            let mut blocks = Vec::new();
+            for (_, name, usage) in &visible {
+                let session = usage.and_then(|u| remaining_fraction(&u.session));
+                let weekly = usage.and_then(|u| remaining_fraction(&u.weekly));
+                if ring.is_none() && usage.is_some() {
+                    ring = Some(tray_icon::RingValues { session, weekly });
+                }
+                let lines = format!(
+                    "{}
+{}",
+                    tray_quota_line(lang, false, session),
+                    tray_quota_line(lang, true, weekly)
+                );
+                blocks.push(if visible.len() > 1 {
+                    format!("{name}
+{lines}")
+                } else {
+                    lines
+                });
             }
             Some(tray_icon::TrayIconData {
-                tooltip: if services.is_empty() {
+                tooltip: if blocks.is_empty() {
                     strings.window_title.to_string()
                 } else {
-                    services.join("\n")
+                    blocks.join("
+")
                 },
+                ring: Some(ring.unwrap_or(tray_icon::RingValues {
+                    session: None,
+                    weekly: None,
+                })),
             })
         }
         Some(s) => {
@@ -1101,6 +1152,10 @@ fn tray_icon_data_from_state() -> Option<tray_icon::TrayIconData> {
             };
             Some(tray_icon::TrayIconData {
                 tooltip: tooltip.to_string(),
+                ring: Some(tray_icon::RingValues {
+                    session: None,
+                    weekly: None,
+                }),
             })
         }
         None => None,
@@ -1379,11 +1434,11 @@ fn window_notes(
     now: SystemTime,
     language: LanguageId,
 ) -> Vec<String> {
-    let chinese = language == LanguageId::SimplifiedChinese;
+    let lang = language.tip_lang();
     let mut notes = Vec::new();
     for (section, weekly) in [(&usage.session, false), (&usage.weekly, true)] {
         if !section.has_reading() {
-            notes.push(quota_tooltip::message(chinese, weekly).to_string());
+            notes.push(quota_tooltip::message(lang, weekly).to_string());
             continue;
         }
         if window_reset(section.resets_at, observed_at, now) == WindowReset::Current {
@@ -1393,6 +1448,8 @@ fn window_notes(
                     (LanguageId::SimplifiedChinese, true) => "周额度重置",
                     (LanguageId::TraditionalChinese, false) => "5 小時額度重置",
                     (LanguageId::TraditionalChinese, true) => "每週額度重置",
+                    (LanguageId::Korean, false) => "5시간 한도 초기화",
+                    (LanguageId::Korean, true) => "주간 한도 초기화",
                     (_, false) => "5-hour reset",
                     (_, true) => "Weekly reset",
                 };
@@ -1401,13 +1458,19 @@ fn window_notes(
             continue;
         }
         let at = format_precise_reset_time(section.resets_at).unwrap_or_default();
-        notes.push(match (chinese, weekly) {
-            (true, false) => format!("5 小时限额已于 {at} 重置（晚于上次读数），正在等待新读数。"),
-            (true, true) => format!("每周限额已于 {at} 重置（晚于上次读数），正在等待新读数。"),
-            (false, false) => format!(
+        notes.push(match (lang, weekly) {
+            (TipLang::Korean, false) => format!(
+                "마지막 조회 이후 {at}에 5시간 한도가 초기화되었습니다. 새 데이터를 기다리는 중입니다."
+            ),
+            (TipLang::Korean, true) => format!(
+                "마지막 조회 이후 {at}에 주간 한도가 초기화되었습니다. 새 데이터를 기다리는 중입니다."
+            ),
+            (TipLang::Chinese, false) => format!("5 小时限额已于 {at} 重置（晚于上次读数），正在等待新读数。"),
+            (TipLang::Chinese, true) => format!("每周限额已于 {at} 重置（晚于上次读数），正在等待新读数。"),
+            (TipLang::English, false) => format!(
                 "The 5-hour window reset at {at}, after the last reading. Waiting for a new reading."
             ),
-            (false, true) => format!(
+            (TipLang::English, true) => format!(
                 "The weekly window reset at {at}, after the last reading. Waiting for a new reading."
             ),
         });
@@ -2637,7 +2700,7 @@ fn update_quota_tooltips() {
         let Some(s) = state.as_ref() else { return };
         let mut regions = Vec::new();
         if !s.dragging {
-            let chinese = s.language == LanguageId::SimplifiedChinese;
+            let lang = s.language.tip_lang();
             let count = active_model_count(s.show_claude_code, s.show_codex, s.show_antigravity);
             let (label_width, text_width) = current_usage_layout_widths(s);
             let width = model_usage_width(row_bar_segment_count(count), text_width, s.appearance);
@@ -2660,14 +2723,17 @@ fn update_quota_tooltips() {
                 }
                 let service = &s.monitor.services[id];
                 let now = SystemTime::now();
-                let description = service.description(now, Instant::now(), chinese);
+                let description = service.description(now, Instant::now(), lang);
                 let mut text = format!("{name}\n{description}");
                 if service.error.is_some() && session == "!" {
-                    text.push_str(if chinese {
-                        "\n本服务本次未返回额度。"
-                    } else {
-                        "\nThis provider did not return quota in the latest update."
-                    });
+                    text.push_str(lang.pick(
+                        "
+本服务本次未返回额度。",
+                        "
+이 서비스가 최근 업데이트에서 한도 정보를 반환하지 않았습니다.",
+                        "
+This provider did not return quota in the latest update.",
+                    ));
                 }
                 if let Some(usage) = service
                     .data
@@ -3059,32 +3125,16 @@ fn poll_error_display_label(error: poller::PollError, language: LanguageId) -> &
         | poller::PollError::NoCredentials
         | poller::PollError::TokenExpired => "!",
         poller::PollError::NetworkUnavailable => {
-            if language == LanguageId::SimplifiedChinese {
-                "网络"
-            } else {
-                "NET"
-            }
+            language.tip_lang().pick("网络", "NET", "NET")
         }
         poller::PollError::RateLimited(_) => {
-            if language == LanguageId::SimplifiedChinese {
-                "限流"
-            } else {
-                "429"
-            }
+            language.tip_lang().pick("限流", "429", "429")
         }
         poller::PollError::ServerError => {
-            if language == LanguageId::SimplifiedChinese {
-                "服务"
-            } else {
-                "5XX"
-            }
+            language.tip_lang().pick("服务", "5XX", "5XX")
         }
         poller::PollError::RequestFailed => {
-            if language == LanguageId::SimplifiedChinese {
-                "错误"
-            } else {
-                "ERR"
-            }
+            language.tip_lang().pick("错误", "오류", "ERR")
         }
     }
 }
@@ -3201,7 +3251,12 @@ fn collect_reset_alerts(
             .observe(provider, weekly, section, now);
         changed |= saved;
         if reset {
-            let (title, message) = if state.language == LanguageId::SimplifiedChinese {
+            let (title, message) = if state.language == LanguageId::Korean {
+                (
+                    format!("{name} 한도 초기화"),
+                    format!("{window} 한도를 다시 사용할 수 있습니다."),
+                )
+            } else if state.language == LanguageId::SimplifiedChinese {
                 (
                     format!("{name} 额度已重置"),
                     format!("{window} 窗口的额度已恢复。"),

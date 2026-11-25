@@ -144,53 +144,64 @@ impl History {
     pub fn description(
         &self,
         now: SystemTime,
-        chinese: bool,
+        lang: crate::localization::TipLang,
         last_poll_ok: bool,
         interval_ms: u32,
     ) -> String {
         let Some(last) = self.last_success else {
-            return if chinese {
-                "等待首次成功更新。"
-            } else {
-                "Waiting for the first successful update."
-            }
-            .into();
+            return lang
+                .pick(
+                    "等待首次成功更新。",
+                    "첫 업데이트를 기다리는 중입니다.",
+                    "Waiting for the first successful update.",
+                )
+                .into();
         };
         let age = now.duration_since(last).unwrap_or_default().as_secs() / 60;
         let time = native_interop::system_time_to_local(last)
             .map(|t| format!("{:02}:{:02}:{:02}", t.wHour, t.wMinute, t.wSecond))
             .unwrap_or_else(|| "--".into());
         let cadence = if interval_ms < 60_000 {
-            if chinese {
-                format!("{} 秒", interval_ms / 1000)
-            } else {
-                format!("{} sec", interval_ms / 1000)
-            }
-        } else if chinese {
-            format!("{} 分钟", interval_ms / 60_000)
+            let n = interval_ms / 1000;
+            lang.pick(format!("{n} 秒"), format!("{n}초"), format!("{n} sec"))
         } else {
-            format!("{} min", interval_ms / 60_000)
+            let n = interval_ms / 60_000;
+            lang.pick(format!("{n} 分钟"), format!("{n}분"), format!("{n} min"))
         };
-        let mut result = if chinese {
+        let mut result = lang.pick(
             format!(
-                "数字表示剩余额度。\n上次成功更新：{time}（{age} 分钟前）\n当前刷新间隔：{cadence}。"
-            )
-        } else {
-            format!("Numbers indicate quota used.\nLast successful update: {time} ({age} min ago)\nCurrent refresh interval: {cadence}.")
-        };
+                "数字表示剩余额度。
+上次成功更新：{time}（{age} 分钟前）
+当前刷新间隔：{cadence}。"
+            ),
+            format!(
+                "숫자는 남은 한도를 나타냅니다.
+마지막 업데이트: {time} ({age}분 전)
+현재 새로 고침 간격: {cadence}"
+            ),
+            format!("Numbers indicate quota used.
+Last successful update: {time} ({age} min ago)
+Current refresh interval: {cadence}."),
+        );
         if !last_poll_ok {
-            result.push_str(if chinese {
-                "\n最近更新失败，正在等待重试或重新登录。"
-            } else {
-                "\nThe latest update failed; awaiting retry or sign-in."
-            });
+            result.push_str(lang.pick(
+                "
+最近更新失败，正在等待重试或重新登录。",
+                "
+최근 업데이트에 실패했습니다. 재시도 또는 다시 로그인을 기다리는 중입니다.",
+                "
+The latest update failed; awaiting retry or sign-in.",
+            ));
         }
         if self.is_stale(now) {
-            result.push_str(if chinese {
-                "\n* 数据已过期，请刷新确认。"
-            } else {
-                "\n* Data is stale; refresh to confirm."
-            });
+            result.push_str(lang.pick(
+                "
+* 数据已过期，请刷新确认。",
+                "
+* 데이터가 오래되었습니다. 새로 고쳐 확인하세요.",
+                "
+* Data is stale; refresh to confirm.",
+            ));
         }
         result
     }
@@ -315,7 +326,7 @@ mod tests {
     fn retry_tooltip_reports_seconds_instead_of_zero_minutes() {
         let mut history = History::default();
         history.record_success(SystemTime::now(), 60_000);
-        let text = history.description(SystemTime::now(), true, false, 30_000);
+        let text = history.description(SystemTime::now(), crate::localization::TipLang::Chinese, false, 30_000);
         assert!(text.contains("30 秒"));
         assert!(!text.contains("0 分钟。"));
     }

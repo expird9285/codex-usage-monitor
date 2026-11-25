@@ -6,6 +6,8 @@ use windows::Win32::Foundation::*;
 use windows::Win32::UI::Controls::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use crate::localization::TipLang;
+
 #[derive(Default)]
 struct State {
     window: isize,
@@ -25,16 +27,19 @@ static STATE: Mutex<State> = Mutex::new(State {
 // the standard tooltip control accepts these TOOLINFO structures.
 const TOOL_INFO_SIZE: u32 = std::mem::offset_of!(TTTOOLINFOW, lpReserved) as u32;
 
-pub fn message(chinese: bool, weekly: bool) -> &'static str {
-    match (chinese, weekly) {
-        (true, false) => "账号未提供 5 小时限额；-- 表示无该窗口的数据，并非剩余 100%。",
-        (true, true) => "账号未提供每周限额；-- 表示无该窗口的数据，并非剩余 100%。",
-        (false, false) => {
-            "The account does not report a 5-hour quota. -- means unavailable, not 100% remaining."
-        }
-        (false, true) => {
-            "The account does not report a weekly quota. -- means unavailable, not 100% remaining."
-        }
+pub fn message(lang: TipLang, weekly: bool) -> &'static str {
+    if weekly {
+        lang.pick(
+            "账号未提供每周限额；-- 表示无该窗口的数据，并非剩余 100%。",
+            "계정에서 주간 한도를 제공하지 않습니다. --는 데이터 없음이며 100% 남음이 아닙니다.",
+            "The account does not report a weekly quota. -- means unavailable, not 100% remaining.",
+        )
+    } else {
+        lang.pick(
+            "账号未提供 5 小时限额；-- 表示无该窗口的数据，并非剩余 100%。",
+            "계정에서 5시간 한도를 제공하지 않습니다. --는 데이터 없음이며 100% 남음이 아닙니다.",
+            "The account does not report a 5-hour quota. -- means unavailable, not 100% remaining.",
+        )
     }
 }
 
@@ -167,8 +172,8 @@ mod tests {
             sync(
                 owner,
                 vec![
-                    (rect, message(true, false).into()),
-                    (rect, message(true, true).into()),
+                    (rect, message(TipLang::Chinese, false).into()),
+                    (rect, message(TipLang::Chinese, true).into()),
                 ],
             );
             let tooltip = HWND(STATE.lock().unwrap().window as *mut _);
@@ -176,7 +181,7 @@ mod tests {
                 SendMessageW(tooltip, TTM_GETTOOLCOUNT, WPARAM(0), LPARAM(0)).0,
                 2
             );
-            sync(owner, vec![(rect, message(false, false).into())]);
+            sync(owner, vec![(rect, message(TipLang::English, false).into())]);
             assert_eq!(
                 SendMessageW(tooltip, TTM_GETTOOLCOUNT, WPARAM(0), LPARAM(0)).0,
                 1

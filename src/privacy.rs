@@ -23,8 +23,10 @@ pub const fn default_passive_monitoring() -> bool {
     true
 }
 
+// Personal fork: never auto-update from upstream releases (that would replace
+// the customised build). Can still be enabled in settings.
 pub const fn default_updates_enabled() -> bool {
-    true
+    false
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
@@ -39,7 +41,7 @@ impl Default for Preferences {
     fn default() -> Self {
         Self {
             passive_monitoring: true,
-            updates_enabled: true,
+            updates_enabled: default_updates_enabled(),
         }
     }
 }

@@ -369,16 +369,20 @@ impl Service {
     pub fn stale(&self, now: SystemTime) -> bool {
         self.error.is_some() || self.history.is_stale(now)
     }
-    pub fn description(&self, now: SystemTime, clock: Instant, chinese: bool) -> String {
+    pub fn description(
+        &self,
+        now: SystemTime,
+        clock: Instant,
+        lang: crate::localization::TipLang,
+    ) -> String {
         let mut text =
             self.history
-                .description(now, chinese, self.error.is_none(), self.interval_ms);
+                .description(now, lang, self.error.is_none(), self.interval_ms);
         if self.in_flight.is_some() {
-            text.push_str(if chinese {
-                "\n正在刷新…"
-            } else {
-                "\nRefreshing…"
-            });
+            text.push_str(lang.pick("
+正在刷新…", "
+새로 고치는 중…", "
+Refreshing…"));
         } else if self.enabled {
             let delay = self.due.saturating_duration_since(clock);
             let time = now
@@ -387,29 +391,20 @@ impl Service {
                 .map(|t| format!("{:02}:{:02}:{:02}", t.wHour, t.wMinute, t.wSecond))
                 .unwrap_or_else(|| "--".into());
             let label = if self.auth.is_some() {
-                if chinese {
-                    "下次检查登录凭据"
-                } else {
-                    "Next credential check"
-                }
+                lang.pick("下次检查登录凭据", "다음 로그인 정보 확인", "Next credential check")
             } else if self.error.is_some() {
-                if chinese {
-                    "下次重试"
-                } else {
-                    "Next retry"
-                }
+                lang.pick("下次重试", "다음 재시도", "Next retry")
             } else {
-                if chinese {
-                    "下次刷新"
-                } else {
-                    "Next refresh"
-                }
+                lang.pick("下次刷新", "다음 새로 고침", "Next refresh")
             };
-            text.push_str(&format!("\n{label}：{time}"));
+            let sep = lang.pick("：", ": ", "：");
+            text.push_str(&format!("
+{label}{sep}{time}"));
         }
         if let Some(error) = self.error {
-            let reason = if chinese {
-                match error {
+            use crate::localization::TipLang;
+            let reason = match lang {
+                TipLang::Chinese => match error {
                     PollError::AuthRequired => "需要重新登录",
                     PollError::NoCredentials => "未找到登录凭据",
                     PollError::TokenExpired => "登录已过期",
@@ -417,25 +412,33 @@ impl Service {
                     PollError::RateLimited(_) => "请求过于频繁，正在退避",
                     PollError::ServerError => "服务暂时不可用",
                     PollError::RequestFailed => "无法读取额度响应",
-                }
-            } else {
-                error.category()
+                },
+                TipLang::Korean => match error {
+                    PollError::AuthRequired => "다시 로그인해야 합니다",
+                    PollError::NoCredentials => "로그인 정보를 찾을 수 없습니다",
+                    PollError::TokenExpired => "로그인이 만료되었습니다",
+                    PollError::NetworkUnavailable => "네트워크 연결 실패",
+                    PollError::RateLimited(_) => "요청이 너무 많아 잠시 대기 중",
+                    PollError::ServerError => "서비스를 일시적으로 사용할 수 없습니다",
+                    PollError::RequestFailed => "한도 응답을 읽을 수 없습니다",
+                },
+                TipLang::English => error.category(),
             };
             text.push_str(&format!(
-                "\n{}: {}",
-                if chinese {
-                    "最近请求失败"
-                } else {
-                    "Latest request failed"
-                },
+                "
+{}: {}",
+                lang.pick("最近请求失败", "최근 요청 실패", "Latest request failed"),
                 reason
             ));
             if self.auth.is_some() {
-                text.push_str(if chinese {
-                    "\n已暂停接口重试，等待登录凭据更新；也可手动刷新。"
-                } else {
-                    "\nAPI retries paused until credentials change; manual refresh is available."
-                });
+                text.push_str(lang.pick(
+                    "
+已暂停接口重试，等待登录凭据更新；也可手动刷新。",
+                    "
+로그인 정보가 바뀔 때까지 API 재시도를 멈췄습니다. 수동 새로 고침은 가능합니다.",
+                    "
+API retries paused until credentials change; manual refresh is available.",
+                ));
             }
         }
         text
@@ -598,13 +601,13 @@ mod tests {
         let mut monitor = Monitor::new([true, false, false], now);
         let job = monitor.plan(now).remove(0);
         assert!(monitor.services[0]
-            .description(wall, now, true)
+            .description(wall, now, crate::localization::TipLang::Chinese)
             .contains("正在刷新"));
         assert!(monitor.services[0]
-            .description(wall, now, false)
+            .description(wall, now, crate::localization::TipLang::English)
             .contains("Refreshing"));
         complete(&mut monitor, &job, Ok(usage(20.0)), now, wall);
-        let description = monitor.services[0].description(wall, now, true);
+        let description = monitor.services[0].description(wall, now, crate::localization::TipLang::Chinese);
         assert!(description.contains("下次刷新："));
         assert!(!description.contains("正在刷新"));
         monitor.force(now, true);
@@ -617,13 +620,13 @@ mod tests {
             wall,
         );
         assert!(monitor.services[0]
-            .description(wall, now, true)
+            .description(wall, now, crate::localization::TipLang::Chinese)
             .contains("下次重试："));
         monitor.force(now, true);
         let job = monitor.plan(now).remove(0);
         complete(&mut monitor, &job, Err(PollError::NoCredentials), now, wall);
         assert!(monitor.services[0]
-            .description(wall, now, true)
+            .description(wall, now, crate::localization::TipLang::Chinese)
             .contains("下次检查登录凭据："));
     }
 

@@ -33,7 +33,34 @@ pub enum LanguageId {
     PortugueseBrazil,
 }
 
+/// Language choice for the handful of free-form tooltip/notice strings that
+/// are written inline (Simplified Chinese, Korean, everything else English).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TipLang {
+    Chinese,
+    Korean,
+    English,
+}
+
+impl TipLang {
+    pub fn pick<T>(self, zh: T, ko: T, en: T) -> T {
+        match self {
+            Self::Chinese => zh,
+            Self::Korean => ko,
+            Self::English => en,
+        }
+    }
+}
+
 impl LanguageId {
+    pub fn tip_lang(self) -> TipLang {
+        match self {
+            Self::SimplifiedChinese => TipLang::Chinese,
+            Self::Korean => TipLang::Korean,
+            _ => TipLang::English,
+        }
+    }
+
     pub const ALL: [LanguageId; 12] = [
         LanguageId::English,
         LanguageId::Dutch,

@@ -3615,11 +3615,11 @@ impl Panel {
 
         if let Some(banner) = self.banner {
             let banner = translated(banner, x_offset, -scroll);
-            let message = if language == LanguageId::SimplifiedChinese {
-                "无法保存设置。请检查设置文件的写入权限。"
-            } else {
-                "Could not save settings. Check write access to the settings file."
-            };
+            let message = language.tip_lang().pick(
+                "无法保存设置。请检查设置文件的写入权限。",
+                "설정을 저장할 수 없습니다. 설정 파일의 쓰기 권한을 확인하세요.",
+                "Could not save settings. Check write access to the settings file.",
+            );
             let mut text = inset(banner, self.px(CARD_PAD), 0);
             if self.fonts.has_icons {
                 draw_text(

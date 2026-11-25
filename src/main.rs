@@ -17,6 +17,7 @@ mod quota_tooltip;
 mod recovery_events;
 mod reset_alerts;
 mod retry_after;
+mod ring_icon;
 mod settings_store;
 mod theme;
 mod tray_icon;
